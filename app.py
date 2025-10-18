@@ -1,62 +1,71 @@
+import os
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
+import numpy as np
 from PIL import Image
-import torch
-import io
-
-app = FastAPI()
-
-# Lazy-load CLIP and model only when needed
-clip_model = None
-preprocess = None
-embeddings = None
-device = "cpu"  # Use CPU — Render free plan has no GPU
-
-@app.on_event("startup")
-def startup_event():
-    print("🚀 Server started — model will load only when the first request arrives.")
+import tensorflow as tf
+from contextlib import asynccontextmanager
+import uvicorn
 
 
-@app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    global clip_model, preprocess, embeddings
+# --- Lifespan handler (replaces deprecated @app.on_event("startup")) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global model
 
-    # Lazy import CLIP only when needed
-    if clip_model is None:
-        print("⏳ Loading CLIP model...")
-        import clip
-        clip_model, preprocess = clip.load("ViT-B/32", device=device)
-        clip_model.eval()
-        print("✅ CLIP model loaded.")
+    try:
+        print("🚀 Loading TensorFlow model...")
+        model = tf.keras.models.load_model("poster_model_fixed.h5")
+        print("✅ Model loaded successfully")
+    except Exception as e:
+        print("❌ Model failed to load:", e)
+        model = None
 
-        # Load embeddings file once
-        print("⏳ Loading poster embeddings...")
-        data = torch.load("poster_embeddings.pt", map_location=device)
-        embeddings = data["embeddings"]
-        print(f"✅ Loaded {len(embeddings)} embeddings.")
+    yield  # App runs while inside this block
 
-    # Read uploaded image
-    img_bytes = await file.read()
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    img_tensor = preprocess(img).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        query_emb = clip_model.encode_image(img_tensor)
-        query_emb /= query_emb.norm(dim=-1, keepdim=True)
-
-    # Compare against stored embeddings
-    best_score = -1
-    best_poster = None
-    for poster, emb in embeddings.items():
-        emb = emb.to(device)
-        score = (query_emb @ emb.T).item()
-        if score > best_score:
-            best_score = score
-            best_poster = poster
-
-    return JSONResponse({"poster": best_poster, "score": round(best_score, 3)})
+    print("🔻 Shutting down app")
 
 
+# --- Initialize app ---
+app = FastAPI(lifespan=lifespan)
+
+
+# --- Helper function for image preprocessing ---
+def preprocess_image(image: Image.Image) -> np.ndarray:
+    image = image.resize((224, 224))
+    image_array = np.array(image) / 255.0
+    image_array = np.expand_dims(image_array, axis=0)
+    return image_array
+
+
+# --- Endpoint for search ---
+@app.post("/search")
+async def search(file: UploadFile = File(...)):
+    if model is None:
+        return JSONResponse(content={"error": "Model not loaded"}, status_code=500)
+
+    try:
+        # Open and preprocess the image
+        image = Image.open(file.file).convert("RGB")
+        processed = preprocess_image(image)
+
+        # Run inference
+        preds = model.predict(processed)
+        prediction = np.argmax(preds, axis=1).tolist()
+
+        return {"prediction": prediction}
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# --- Root endpoint ---
 @app.get("/")
-def home():
-    return {"message": "Poster Recognition API is running 🚀"}
+def root():
+    return {"message": "Poster recognition API is running!"}
+
+
+# --- Main entry point (Render needs this to bind the correct port) ---
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)

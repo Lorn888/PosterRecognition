@@ -15,7 +15,7 @@ async def lifespan(app: FastAPI):
 
     try:
         print("🚀 Loading TensorFlow model...")
-        model = tf.keras.models.load_model("poster_model_fixed.h5")
+        model = tf.keras.models.load_model("poster_model_fixed_215.h5")
         print("✅ Model loaded successfully")
     except Exception as e:
         print("❌ Model failed to load:", e)
